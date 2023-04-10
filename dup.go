@@ -1,3 +1,4 @@
+//go:build ((linux && !arm && !arm64) || !linux) && !windows
 // +build linux,!arm,!arm64 !linux
 // +build !windows
 
@@ -10,7 +11,7 @@ import (
 )
 
 func dup(oldfd int) (fd int, err error) {
-	return unix.Dup(oldfd)
+	return unix.FcntlInt(uintptr(oldfd), unix.F_DUPFD_CLOEXEC, 0)
 }
 
 func redirectStderr(target *os.File) error {
