@@ -20,7 +20,7 @@ import (
 )
 
 const panicRegexTemplate = `goroutine 1 \[running\]:
-main\.executeCommand\({?0x[a-z0-9]+, 0x[a-z0-9]+}?\)
+main\.executeCommand\({?0x[a-z0-9]+\??, 0x[a-z0-9]+\??}?\)
 \t%[1]s/cmd/test/test\.go:\d+ \+0x[a-z0-9]+
 main.main\(\)
 \t%[1]s/cmd/test/test\.go:\d+ \+0x[a-z0-9]+
