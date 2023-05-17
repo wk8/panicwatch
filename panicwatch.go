@@ -73,9 +73,10 @@ const (
 // This watcher process will read the original stderr and tee it into the replaced file descriptor. When the application
 // exits, the watcher process will check if there was a panic in the original stderr. If yes, it will call the OnPanic
 // callback. If the watcher process encounters an error or dies, then appropriate callback is called if configured.
-func Start(config Config) error {
+// It returns the process object for the watcher process
+func Start(config Config) (*os.Process, error) {
 	if err := checkConfig(&config); err != nil {
-		return err
+		return nil, err
 	}
 
 	if os.Getenv(cookieName) == cookieValue {
@@ -85,22 +86,22 @@ func Start(config Config) error {
 
 	exePath, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	originalStderrFd, err := dup(int(os.Stderr.Fd()))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	err = redirectStderr(stderrW)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	originalStderr := os.NewFile(uintptr(originalStderrFd), os.Stderr.Name())
@@ -112,7 +113,7 @@ func Start(config Config) error {
 
 	err = cmd.Start()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	go func() {
@@ -126,7 +127,7 @@ func Start(config Config) error {
 		config.OnWatcherDied(err)
 	}()
 
-	return nil
+	return cmd.Process, nil
 }
 
 func checkConfig(config *Config) error {

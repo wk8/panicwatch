@@ -33,7 +33,7 @@ func main() {
 		}
 	}
 
-	err := panicwatch.Start(panicwatch.Config{OnPanic: panicHandler})
+	_, err := panicwatch.Start(panicwatch.Config{OnPanic: panicHandler})
 	if err != nil {
 		stderr("unexpected error:", err.Error())
 		os.Exit(3)
