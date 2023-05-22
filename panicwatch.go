@@ -7,13 +7,16 @@ package panicwatch
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/glycerine/rbuf"
 	goerrors "github.com/go-errors/errors"
@@ -50,11 +53,15 @@ func (p Panic) AsError() error {
 
 // Config holds the configuration of panicwatch.
 type Config struct {
-	// BufferSize specifies the size of the read buffer between dup-ed stderr and the real one. Optional/
+	// BufferSize specifies the size of the read buffer between dup-ed stderr and the real one. Optional.
 	BufferSize int
 	// PanicDetectorBufferSize specifies the size of the buffer used to detect panic.
 	// Too low value will cause the detection to fail. Optional.
 	PanicDetectorBufferSize int
+	// WaitForWatcherToStartFor is how long the main process will wait for the watcher child process to be up & running.
+	// Optional. If not set, the main process will not wait for the watcher child process before proceeding.
+	// Not supported on Windows.
+	WaitForWatcherToStartFor time.Duration
 	// OnPanic is a callback that will be called after your application dies, if a panic is detected. Required.
 	OnPanic func(Panic)
 	// OnWatcherErr is a callback that will be called when watcher process encounters an error. Optional.
@@ -65,8 +72,8 @@ type Config struct {
 }
 
 const (
-	cookieName  = "XkqVuiPZaKYxS3f2lHoYDTNfBPYNT24woDplRI4Z"
-	cookieValue = "zQXfl15CShjg5yQzEqoGAIgFeyXhlr9JQABuYCXm"
+	CookieName  = "XkqVuiPZaKYxS3f2lHoYDTNfBPYNT24woDplRI4Z"
+	CookieValue = "zQXfl15CShjg5yQzEqoGAIgFeyXhlr9JQABuYCXm"
 )
 
 // Start validates panicwatch config, replaces the stderr file descriptor with a new one and starts a watcher process.
@@ -75,11 +82,11 @@ const (
 // callback. If the watcher process encounters an error or dies, then appropriate callback is called if configured.
 // It returns the process object for the watcher process
 func Start(config Config) (*os.Process, error) {
-	if err := checkConfig(&config); err != nil {
+	if err := config.validateAndSetDefaults(); err != nil {
 		return nil, err
 	}
 
-	if os.Getenv(cookieName) == cookieValue {
+	if os.Getenv(CookieName) == CookieValue {
 		runMonitoringProcess(config)
 		panic("this never should've been executed")
 	}
@@ -107,13 +114,49 @@ func Start(config Config) (*os.Process, error) {
 	originalStderr := os.NewFile(uintptr(originalStderrFd), os.Stderr.Name())
 
 	cmd := exec.Command(exePath, os.Args[1:]...)
-	cmd.Env = append(os.Environ(), cookieName+"="+cookieValue)
+	cmd.Env = append(os.Environ(), CookieName+"="+CookieValue)
 	cmd.Stdin = stderrR
 	cmd.Stdout = originalStderr
+
+	var startedPipeR *os.File
+	if config.WaitForWatcherToStartFor != 0 {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		cmd.ExtraFiles = []*os.File{w}
+		startedPipeR = r
+	}
 
 	err = cmd.Start()
 	if err != nil {
 		return nil, err
+	}
+
+	if config.WaitForWatcherToStartFor != 0 {
+		monitorStartedCh := make(chan error)
+
+		go func() {
+			buf := make([]byte, 1)
+			var err error
+			for read := 0; read == 0; {
+				read, err = startedPipeR.Read(buf)
+				if err != nil {
+					monitorStartedCh <- err
+					return
+				}
+			}
+			close(monitorStartedCh)
+		}()
+
+		select {
+		case err := <-monitorStartedCh:
+			if err != nil {
+				return nil, err
+			}
+		case <-time.After(config.WaitForWatcherToStartFor):
+			return nil, errors.New("timed out waiting for monitor to start")
+		}
 	}
 
 	go func() {
@@ -130,25 +173,29 @@ func Start(config Config) (*os.Process, error) {
 	return cmd.Process, nil
 }
 
-func checkConfig(config *Config) error {
-	if config.OnPanic == nil {
+func (c *Config) validateAndSetDefaults() error {
+	if c.OnPanic == nil {
 		return errors.New("OnPanic callback must be set")
 	}
 
-	if config.BufferSize < 0 {
+	if c.BufferSize < 0 {
 		return errors.New("BufferSize can't be less than zero")
 	}
 
-	if config.BufferSize == 0 {
-		config.BufferSize = 1e5
+	if c.BufferSize == 0 {
+		c.BufferSize = 1e5
 	}
 
-	if config.PanicDetectorBufferSize < 0 {
+	if c.PanicDetectorBufferSize < 0 {
 		return errors.New("PanicDetectorBufferSize can't be less than zero")
 	}
 
-	if config.PanicDetectorBufferSize == 0 {
-		config.PanicDetectorBufferSize = 1e5
+	if c.WaitForWatcherToStartFor != 0 && runtime.GOOS == "windows" {
+		return errors.New("WaitForWatcherToStartFor not supported on windows")
+	}
+
+	if c.PanicDetectorBufferSize == 0 {
+		c.PanicDetectorBufferSize = 1e5
 	}
 
 	return nil
@@ -164,6 +211,13 @@ const panicHeaderSuffix = ": "
 
 func runMonitoringProcess(config Config) {
 	signal.Ignore()
+
+	if config.WaitForWatcherToStartFor != 0 {
+		startedPipeR := os.NewFile(3, "startedPipeR")
+		if _, err := startedPipeR.Write([]byte("1")); err != nil {
+			panic(fmt.Sprintf("unable to notify main process that watcher has started: %v", err))
+		}
+	}
 
 	readBuffer := make([]byte, config.BufferSize)
 	buffer := rbuf.NewFixedSizeRingBuf(config.PanicDetectorBufferSize)

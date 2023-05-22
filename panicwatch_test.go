@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -49,6 +48,8 @@ func TestPanicwatch(t *testing.T) {
 		// if true, the test won't attempt to check the stacktrace
 		// this comes in handy for tests that involve several routines, any of which can cause the crash
 		nonDeterministicStacktrace bool
+		// if set, the test program logs certain steps to a log file, and those are the expected contents
+		logFile string
 	}{
 		{
 			command:        "no-panic",
@@ -98,15 +99,41 @@ func TestPanicwatch(t *testing.T) {
 			expectedPanic:              "concurrent map writes",
 			nonDeterministicStacktrace: true,
 		},
+		{
+			command:          "wait-for-watcher",
+			expectedExitCode: 2,
+			expectedPanic:    "panic right after starting panicwatch but some time after starting the program",
+			logFile:          "[MAIN] starting\n[WATCHER] starting\n[MAIN] started\n",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.command, func(t *testing.T) {
 			assert := require.New(t)
 
-			cmd, stdout, stderr, resultFile := helperProcess(test.command)
-			defer os.Remove(resultFile)
+			var (
+				logFilePath  string
+				envVariables []string
+			)
+			if test.logFile != "" {
+				logFile, err := os.CreateTemp("", "panicwatch-test-log")
+				assert.NoError(err)
+
+				logFilePath = logFile.Name()
+				envVariables = append(envVariables, fmt.Sprintf("_PANICWATCH_TEST_LOG_FILE=%s", logFilePath))
+				defer func() { assert.NoError(os.Remove(logFilePath)) }()
+			}
+
+			cmd, stdout, stderr, resultFile := helperProcess(test.command, envVariables...)
+			defer func() { assert.NoError(os.Remove(resultFile)) }()
 
 			err := cmd.Run()
+
+			if test.logFile != "" {
+				logs, err := os.ReadFile(logFilePath)
+				assert.NoError(err)
+
+				assert.Equal(test.logFile, string(logs))
+			}
 
 			if test.expectedExitCode == 0 {
 				assert.NoError(err, "unexpected exit code, stderr: "+stderr.String())
@@ -184,8 +211,8 @@ func TestPanicwatch(t *testing.T) {
 }
 
 // Each test uses this test method to run a separate process in order to test the functionality.
-func helperProcess(command string) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer, string) {
-	f, err := ioutil.TempFile("", "result")
+func helperProcess(command string, envVariables ...string) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer, string) {
+	f, err := os.CreateTemp("", "result")
 	if err != nil {
 		panic(err)
 	}
@@ -198,6 +225,9 @@ func helperProcess(command string) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer, str
 	cmd := exec.Command("./test", command, f.Name()) //nolint:gosec // we control the inputs
 	cmd.Stderr = new(bytes.Buffer)
 	cmd.Stdout = new(bytes.Buffer)
+	if len(envVariables) != 0 {
+		cmd.Env = append(os.Environ(), envVariables...)
+	}
 
 	return cmd, cmd.Stdout.(*bytes.Buffer), cmd.Stderr.(*bytes.Buffer), f.Name()
 }
@@ -210,7 +240,7 @@ func getPanicRegex() string {
 }
 
 func readResult(resultFile string) panicwatch.Panic {
-	resultBytes, err := ioutil.ReadFile(resultFile)
+	resultBytes, err := os.ReadFile(resultFile)
 	if err != nil {
 		panic(err)
 	}

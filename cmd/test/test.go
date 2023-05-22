@@ -3,9 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -26,24 +27,37 @@ func main() {
 			os.Exit(3)
 		}
 
-		err = ioutil.WriteFile(args[1], result, 0)
+		err = os.WriteFile(args[1], result, 0)
 		if err != nil {
 			stderr("failed to write results: " + err.Error())
 			os.Exit(3)
 		}
 	}
 
-	_, err := panicwatch.Start(panicwatch.Config{OnPanic: panicHandler})
+	config := panicwatch.Config{OnPanic: panicHandler}
+
+	cmd := args[0]
+
+	if cmd == "wait-for-watcher" {
+		config.WaitForWatcherToStartFor = 500 * time.Millisecond
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	logToFile("starting")
+	_, err := panicwatch.Start(config)
+	logToFile("started")
 	if err != nil {
 		stderr("unexpected error:", err.Error())
 		os.Exit(3)
 	}
 
-	executeCommand(args[0])
+	executeCommand(cmd)
 }
 
 func executeCommand(cmd string) {
 	switch cmd {
+	case "wait-for-watcher":
+		panic("panic right after starting panicwatch but some time after starting the program")
 	case "no-panic":
 		stdout("some stdout output")
 		stderr("some stderr output")
@@ -118,4 +132,29 @@ func stdout(a ...interface{}) {
 
 func stderr(a ...interface{}) {
 	_, _ = fmt.Fprintln(os.Stderr, a...)
+}
+
+func logToFile(format string, args ...interface{}) {
+	logFile := os.Getenv("_PANICWATCH_TEST_LOG_FILE")
+	if logFile == "" {
+		return
+	}
+	logFilePath := filepath.FromSlash(logFile)
+
+	file, err := os.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	processName := "MAIN"
+	if os.Getenv(panicwatch.CookieName) == panicwatch.CookieValue {
+		processName = "WATCHER"
+	}
+
+	logEntry := fmt.Sprintf("[%s] %s\n", processName, fmt.Sprintf(format, args...))
+
+	if _, err = file.WriteString(logEntry); err != nil {
+		log.Fatal(err)
+	}
 }
